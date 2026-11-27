@@ -1,4 +1,4 @@
-﻿"Phrases"
+"Phrases"
 {
 	"SelectServer"
 	{
@@ -8,14 +8,18 @@
 	{
 		"en"		"About to join server ..."
 	}
+    "ConfirmChoice"
+    {
+    	"en"		"Do you confirm your choice?"
+    }
 	"HopNotification"
 	{
 		"#format"	"{1:s},{2:s}"
-		"en"		"{1} has hopped to {2} !"
+		"en"		"{olive}{1} {default}has hopped to {2}"
 	}
 	"Advert"
 	{
 		"#format"	"{1:s},{2:s}"
-		"en"		"{1} [type {2} to join]"
+		"en"		"{1} [type {olive}{2} {default}to join]"
 	}
 }

@@ -2,12 +2,13 @@
 #pragma newdecls required
 #include <sourcemod>
 #include <socket>
+#include <multicolors>
 
-#define PLUGIN_VERSION "1.0.3"
+#define PLUGIN_VERSION "1.0.5"
 #define PLUGIN_DESCRIPTION "Provides live server info with join option"
 #define MAX_SERVERS 10
-#define REFRESH_TIME 60.0
-#define SERVER_TIMEOUT 10.0
+#define REFRESH_TIME 45.0
+#define SERVER_TIMEOUT 120.0
 #define MAX_STR_LEN 160
 #define MAX_INFO_LEN 200
 
@@ -31,7 +32,8 @@ bool
 	g_bLateLoad,
 	g_bCoolDown;
 Handle
-	g_hSocket[MAX_SERVERS];
+	g_hSocket[MAX_SERVERS],
+	g_hTimer;
 ConVar
 	g_cvarHopTrigger,
 	g_cvarServerFormat,
@@ -41,7 +43,7 @@ ConVar
 
 public Plugin myinfo = {
 	name = "Server Hop",
-	author = "[GRAVE] rig0r, JoinedSenses",
+	author = "[GRAVE] rig0r, JoinedSenses, .Rushaway",
 	description = PLUGIN_DESCRIPTION,
 	version = PLUGIN_VERSION,
 	url = "https://github.com/JoinedSenses/TF2-ServerHop"
@@ -59,6 +61,9 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 
 public void OnPluginStart() {
 	LoadTranslations("serverhop.phrases");
+	LoadTranslations("common.phrases");
+
+	RegAdminCmd("sm_hopreload", Command_ReloadConfig, ADMFLAG_CONFIG, "Reload the servers list");
 
 	CreateConVar("sm_serverhop_version", PLUGIN_VERSION, PLUGIN_DESCRIPTION, FCVAR_SPONLY|FCVAR_REPLICATED|FCVAR_NOTIFY|FCVAR_DONTRECORD).SetString(PLUGIN_VERSION);
   // convar setup
@@ -90,15 +95,38 @@ public void OnPluginStart() {
 
 	AutoExecConfig(true, "plugin.serverhop");
 
-	Handle timer = CreateTimer(REFRESH_TIME, RefreshServerInfo, _, TIMER_REPEAT);
-
 	RegConsoleCmd("say", Command_Say);
 	RegConsoleCmd("say_team", Command_Say);
 	RegConsoleCmd("sm_hop", Command_Hop, "Hop servers.");
 	RegConsoleCmd("sm_servers", Command_Servers, "Hop servers.");
 
-	char path[MAX_STR_LEN];
+	LoadConfig();
+	
+	if (g_bLateLoad) {
+		char clientConnectMethod[64];
+		for (int client = 1; client <= MaxClients; client++) {
+			if (IsClientInGame(client) && !IsFakeClient(client)) {
+				GetClientInfo(client, "cl_connectmethod", clientConnectMethod, sizeof(clientConnectMethod));
 
+				if (!StrEqual(clientConnectMethod, "serverbrowser_internet")) {
+					g_bConnectedFromFavorites[client] = true;
+				}
+			}
+		}
+	}
+}
+
+public Action Command_ReloadConfig(int client, int args){
+	LoadConfig();
+	CReplyToCommand(client, "{white}[{darkorange}ServerHop{white}] {default}Config has been reloaded.");
+	return Plugin_Handled;
+}
+
+public void LoadConfig() {
+	delete g_hTimer;
+	g_hTimer = CreateTimer(REFRESH_TIME, RefreshServerInfo, _, TIMER_REPEAT);
+
+	char path[MAX_STR_LEN];
 	BuildPath(Path_SM, path, sizeof(path), "configs/serverhop.cfg");
 	KeyValues kv = new KeyValues("Servers");
 
@@ -127,20 +155,7 @@ public void OnPluginStart() {
 	
 	g_iServerCount = i;
 
-	TriggerTimer(timer);
-	
-	if (g_bLateLoad) {
-		char clientConnectMethod[64];
-		for (int client = 1; client <= MaxClients; client++) {
-			if (IsClientInGame(client) && !IsFakeClient(client)) {
-				GetClientInfo(client, "cl_connectmethod", clientConnectMethod, sizeof(clientConnectMethod));
-
-				if (!StrEqual(clientConnectMethod, "serverbrowser_internet")) {
-					g_bConnectedFromFavorites[client] = true;
-				}
-			}
-		}
-	}
+	TriggerTimer(g_hTimer);
 }
 
 public Action Command_Hop(int client, int args) {
@@ -221,18 +236,23 @@ public int Menu_Handler(Menu menu, MenuAction action, int param1, int param2) {
 		g_sServer[param1] = g_sServerInfo[serverNum];
 
 		if (!g_bConnectedFromFavorites[param1]) {
-			PrintToChat(param1, "\x01[\x03ServerHop\x01] Due to Valve game change, clients must connect via favorites to be redirected by server.");
-			PrintToChat(param1, "\x01[\x03ServerHop\x01] %s:\x03 %s", g_sServer[param1], g_sAddress[param1]);
+			CPrintToChat(param1, "{white}[{darkorange}ServerHop{white}] {default}Due to Valve game change, clients must connect via favorites to be redirected by server.");
+			CPrintToChat(param1, "{white}[{darkorange}ServerHop{white}] {green}%s {olive}%s", g_sServer[param1], g_sAddress[param1]);
 			return 0;
 		}
 
+		char PanelTitle[MAX_STR_LEN], PanelYes[MAX_STR_LEN], PanelNo[MAX_STR_LEN];
+		Format(PanelTitle, sizeof(PanelTitle), "%T", "ConfirmChoice", param1);
+		Format(PanelYes, sizeof(PanelYes), "%T", "Yes", param1);
+		Format(PanelNo, sizeof(PanelNo), "%T", "No", param1);
+	
 		Panel panel = new Panel();
 		panel.SetTitle(menuTitle);
 		panel.DrawText(g_sServerInfo[serverNum]);
-		panel.DrawText("Is this correct?");
+		panel.DrawText(PanelTitle);
 		panel.CurrentKey = 3;
-		panel.DrawItem("Accept");
-		panel.DrawItem("Decline");
+		panel.DrawItem(PanelYes);
+		panel.DrawItem(PanelNo);
 		panel.Send(param1, MenuConfirmHandler, 15);
 
 		delete panel;
@@ -251,7 +271,7 @@ public int MenuConfirmHandler(Menu menu, MenuAction action, int param1, int para
 		if (g_cvarBroadcastHops.BoolValue) {
 			char clientName[MAX_NAME_LENGTH];
 			GetClientName(param1, clientName, sizeof(clientName));
-			PrintToChatAll("\x01[\x03hop\x01] %t", "HopNotification", clientName, g_sServer[param1]);
+			CPrintToChatAll("{white}[{darkorange}ServerHop{white}] {default}%t", "HopNotification", clientName, g_sServer[param1]);
 		}
 	}
 	g_sAddress[param1][0] = '\0';
@@ -271,7 +291,6 @@ public Action RefreshServerInfo(Handle timer) {
 	}
 
 	CreateTimer(SERVER_TIMEOUT, CleanUp);
-
 	return Plugin_Continue;
 }
 
@@ -292,7 +311,6 @@ public Action CleanUp(Handle timer) {
 			g_iAdvertInterval = 1;
 		}
 	}
-
 	return Plugin_Handled;
 }
 
@@ -309,7 +327,7 @@ public void Advertise() {
 	}
 
 	if (strlen(g_sServerInfo[g_iAdvertCount]) > 0) {
-		PrintToChatAll("\x01[\x03hop\x01] %t", "Advert", g_sServerInfo[g_iAdvertCount], trigger);
+		CPrintToChatAll("{white}[{darkorange}ServerHop{white}] {default}- %t", "Advert", g_sServerInfo[g_iAdvertCount], trigger);
 
 		if (++g_iAdvertCount >= g_iServerCount) {
 			g_iAdvertCount = 0;
