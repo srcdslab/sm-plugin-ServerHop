@@ -4,11 +4,18 @@
 #include <socket>
 #include <multicolors>
 
-#define PLUGIN_VERSION "1.0.5"
+#define PLUGIN_VERSION "1.0.6"
 #define PLUGIN_DESCRIPTION "Provides live server info with join option"
 #define MAX_SERVERS 10
 #define REFRESH_TIME 45.0
-#define SERVER_TIMEOUT 120.0
+// Must stay below REFRESH_TIME: with 120 s, each check looked at the query sent by a later refresh,
+// 30 s old, and deleted its socket.
+#define SERVER_TIMEOUT 20.0
+// A map change keeps a server silent for one check: Z.REVIVAL and GunGame logged
+// "css.nide.gg:27015 is down" 37 times from 20 to 27/11/2026, each time while Z.ESCAPE was
+// changing map. A server is only reported down, and left out of the menu, after this many
+// silent checks in a row.
+#define SERVER_MAX_MISSES 2
 #define MAX_STR_LEN 160
 #define MAX_INFO_LEN 200
 
@@ -19,7 +26,8 @@ int
 	g_iServerCount,
 	g_iAdvertCount,
 	g_iAdvertInterval = 1,
-	g_iServerPort[MAX_SERVERS];
+	g_iServerPort[MAX_SERVERS],
+	g_iMisses[MAX_SERVERS];
 char
 	g_sServerName[MAX_SERVERS][MAX_STR_LEN],
 	g_sServerAddress[MAX_SERVERS][MAX_STR_LEN],
@@ -28,6 +36,7 @@ char
 	g_sServer[MAXPLAYERS+1][MAX_INFO_LEN];
 bool
 	g_bSocketError[MAX_SERVERS],
+	g_bReplied[MAX_SERVERS],
 	g_bConnectedFromFavorites[MAXPLAYERS+1],
 	g_bLateLoad,
 	g_bCoolDown;
@@ -154,6 +163,13 @@ public void LoadConfig() {
 	delete kv;
 	
 	g_iServerCount = i;
+
+	// The list may have changed: forget what was known per slot
+	for (int j = 0; j < MAX_SERVERS; j++) {
+		g_sServerInfo[j][0] = '\0';
+		g_iMisses[j] = 0;
+		g_bReplied[j] = false;
+	}
 
 	TriggerTimer(g_hTimer);
 }
@@ -282,7 +298,8 @@ public int MenuConfirmHandler(Menu menu, MenuAction action, int param1, int para
 
 public Action RefreshServerInfo(Handle timer) {
 	for (int i = 0; i < g_iServerCount; i++) {
-		g_sServerInfo[i][0] = '\0';
+		// The last info stays shown until the server misses SERVER_MAX_MISSES checks
+		g_bReplied[i] = false;
 		g_bSocketError[i] = false;
 		delete g_hSocket[i];
 		g_hSocket[i] = SocketCreate(SOCKET_UDP, OnSocketError);
@@ -296,9 +313,26 @@ public Action RefreshServerInfo(Handle timer) {
 
 public Action CleanUp(Handle timer) {
 	for (int i = 0; i < g_iServerCount; i++) {
-		if (strlen(g_sServerInfo[i]) == 0 && !g_bSocketError[i]) {
-			LogError("Server %s:%i is down, no reply received within %0.0f seconds.", g_sServerAddress[i], g_iServerPort[i], SERVER_TIMEOUT);
-			delete g_hSocket[i];
+		if (g_bReplied[i]) {
+			g_iMisses[i] = 0;
+			continue;
+		}
+
+		delete g_hSocket[i];
+
+		// A socket error was already logged (once per 10 min)
+		if (g_bSocketError[i]) {
+			g_sServerInfo[i][0] = '\0';
+			continue;
+		}
+
+		if (++g_iMisses[i] < SERVER_MAX_MISSES)
+			continue;
+
+		g_sServerInfo[i][0] = '\0';
+		// Once per outage
+		if (g_iMisses[i] == SERVER_MAX_MISSES) {
+			LogError("Server %s:%i is down, no reply to %d checks in a row (%0.0f seconds apart).", g_sServerAddress[i], g_iServerPort[i], SERVER_MAX_MISSES, REFRESH_TIME);
 		}
 	}
 
@@ -479,6 +513,7 @@ public void OnSocketReceive(Handle sock, char[] data, const int dataSize, any ar
 	ReplaceString(format, strlen(format), "%bots", botsStr, false);
 
 	g_sServerInfo[arg] = format;
+	g_bReplied[arg] = true;
 
 	delete g_hSocket[arg];
 }
